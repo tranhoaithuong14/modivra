@@ -26,9 +26,8 @@ spring:
       base-url: ${XAI_BASE_URL:https://api.x.ai/v1}
       api-key: ${XAI_API_KEY:dummy-key}
       chat:
-        options:
-          model: ${XAI_MODEL:grok-4.7}
-          temperature: 0.7
+        model: ${XAI_MODEL:grok-4.7}
+        temperature: 0.7
 
 server:
   port: 8080
