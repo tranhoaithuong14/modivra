@@ -26,7 +26,7 @@ public class ConversationEntity {
     private UUID currentNode;
 
     @Column(name = "default_model_slug", nullable = false, length = 128)
-    private String defaultModelSlug = "grok-2-latest";
+    private String defaultModelSlug = "grok-4.7";
 
     @Column(name = "is_archived", nullable = false)
     private boolean archived = false;

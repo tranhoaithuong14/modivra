@@ -42,7 +42,7 @@ public class ConversationTreeService {
     public ConversationTreeService(
         ConversationRepository conversationRepository,
         ConversationNodeRepository nodeRepository,
-        @Value("${spring.ai.openai.chat.options.model:grok-2-latest}") String defaultModelSlug
+        @Value("${spring.ai.openai.chat.options.model:grok-4.7}") String defaultModelSlug
     ) {
         this.conversationRepository = conversationRepository;
         this.nodeRepository = nodeRepository;

@@ -54,7 +54,7 @@ public class ConversationService {
         ConversationTreeService treeService,
         ChatClient chatClient,
         ObjectMapper jsonMapper,
-        @Value("${spring.ai.openai.chat.options.model:grok-2-latest}") String defaultModelSlug
+        @Value("${spring.ai.openai.chat.options.model:grok-4.7}") String defaultModelSlug
     ) {
         this.treeService = treeService;
         this.chatClient = chatClient;
@@ -393,9 +393,6 @@ public class ConversationService {
             emitter.send(SseEmitter.event().data(jsonMapper.writeValueAsString(errorEvent)));
         } catch (Exception ignored) {
         }
-        try {
-            emitter.completeWithError(ex);
-        } catch (Exception ignored) {
-        }
+        completeEmitterQuietly(emitter);
     }
 }
