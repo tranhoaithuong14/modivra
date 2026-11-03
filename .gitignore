@@ -33,3 +33,10 @@ build/
 .vscode/
 
 .agents/
+
+### Local Environment & Secrets ###
+.env
+.env.*
+!.env.example
+application-local.yaml
+application-local.yml
