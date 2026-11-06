@@ -41,7 +41,7 @@ public class ConversationNodeEntity {
     @Column(name = "content", columnDefinition = "jsonb")
     private ContentDto content;
 
-    @Column(name = "model_slug", length = 128)
+    @Column(name = "model_slug", length = 192)
     private String modelSlug;
 
     @Column(name = "status", nullable = false, length = 64)

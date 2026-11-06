@@ -9,6 +9,9 @@ import io.modivra.conversation.ConversationDtos.SseInitialStateValue;
 import io.modivra.conversation.ConversationDtos.SseStreamCompleteEvent;
 import io.modivra.conversation.ConversationDtos.SseTitleGenerationEvent;
 import io.modivra.conversation.ConversationTreeService.TurnPreparationResult;
+import io.modivra.model.routing.MultiProviderChatClientRegistry;
+import io.modivra.model.routing.ResolvedChatModel;
+import io.modivra.model.service.ModelRegistryService;
 import java.io.IOException;
 import java.util.Iterator;
 import java.util.LinkedHashMap;
@@ -46,18 +49,24 @@ public class ConversationService {
     private static final long TITLE_GENERATION_TIMEOUT_MS = 3_000L;
 
     private final ConversationTreeService treeService;
-    private final ChatClient chatClient;
+    private final MultiProviderChatClientRegistry chatClientRegistry;
+    private final ModelRegistryService modelRegistryService;
+    private final ChatClient defaultChatClient;
     private final ObjectMapper jsonMapper;
     private final String defaultModelSlug;
 
     public ConversationService(
         ConversationTreeService treeService,
-        ChatClient chatClient,
+        MultiProviderChatClientRegistry chatClientRegistry,
+        ModelRegistryService modelRegistryService,
+        ChatClient defaultChatClient,
         ObjectMapper jsonMapper,
         @Value("${spring.ai.openai.chat.options.model:grok-4.7}") String defaultModelSlug
     ) {
         this.treeService = treeService;
-        this.chatClient = chatClient;
+        this.chatClientRegistry = chatClientRegistry;
+        this.modelRegistryService = modelRegistryService;
+        this.defaultChatClient = defaultChatClient;
         this.jsonMapper = jsonMapper;
         this.defaultModelSlug = defaultModelSlug;
     }
@@ -121,9 +130,17 @@ public class ConversationService {
         // 2. Phase 2: Stream tokens from LLM without holding any DB connection
         Iterator<ChatResponse> iterator = null;
         try {
-            Flux<ChatResponse> stream = chatClient.prompt()
+            ChatClient client = (prep.resolvedModel() != null && prep.resolvedModel().providerEntity() != null)
+                ? chatClientRegistry.getChatClient(prep.resolvedModel().providerEntity())
+                : defaultChatClient;
+
+            String upstreamModel = (prep.resolvedModel() != null && prep.resolvedModel().upstreamModelId() != null)
+                ? prep.resolvedModel().upstreamModelId()
+                : prep.modelSlug();
+
+            Flux<ChatResponse> stream = client.prompt()
                 .messages(prep.promptMessages())
-                .options(ChatOptions.builder().model(prep.modelSlug()))
+                .options(ChatOptions.builder().model(upstreamModel))
                 .stream()
                 .chatResponse()
                 .takeWhile(chunk -> !aborted.get())
@@ -245,7 +262,7 @@ public class ConversationService {
 
             // Phase 4: Safe Title Generation on First Turn
             if (prep.firstTurn()) {
-                String generatedTitle = generateTitleSafely(prep.firstUserPromptText(), prep.modelSlug());
+                String generatedTitle = generateTitleSafely(prep.firstUserPromptText(), prep.resolvedModel());
                 String effectiveTitle = treeService.updateTitleIfDefault(
                     prep.conversationId(),
                     generatedTitle
@@ -283,22 +300,36 @@ public class ConversationService {
     ) {
         UUID messageId = request != null ? request.messageId() : null;
         String promptText = treeService.resolvePromptForTitleGeneration(conversationId, userId, messageId);
-        String title = generateTitleSafely(promptText, defaultModelSlug);
+        String convModel = treeService.resolveConversationModelSlug(conversationId, userId);
+        ResolvedChatModel resolvedModel = null;
+        try {
+            resolvedModel = modelRegistryService.resolveAndValidateChatModel(convModel);
+        } catch (Exception ex) {
+            log.debug("Model resolution for title generation failed, using fallback: {}", ex.getMessage());
+        }
+        String title = generateTitleSafely(promptText, resolvedModel);
         treeService.updateTitle(conversationId, title);
         return new GenerateTitleResponse(title, conversationId);
     }
 
-    public String generateTitleSafely(String userPrompt, String modelSlug) {
+    public String generateTitleSafely(String userPrompt, ResolvedChatModel resolvedModel) {
         if (userPrompt == null || userPrompt.isBlank()) {
             return "New chat";
         }
-        String resolvedModel = (modelSlug != null && !modelSlug.isBlank()) ? modelSlug : defaultModelSlug;
         try (var executor = Executors.newVirtualThreadPerTaskExecutor()) {
             CompletableFuture<String> future = CompletableFuture.supplyAsync(() -> {
-                String raw = chatClient.prompt()
+                ChatClient client = (resolvedModel != null && resolvedModel.providerEntity() != null)
+                    ? chatClientRegistry.getChatClient(resolvedModel.providerEntity())
+                    : defaultChatClient;
+
+                String modelOption = (resolvedModel != null && resolvedModel.upstreamModelId() != null)
+                    ? resolvedModel.upstreamModelId()
+                    : defaultModelSlug;
+
+                String raw = client.prompt()
                     .system("Generate a concise 3 to 5 word title for this conversation. Return only the title text without quotes.")
                     .user(userPrompt)
-                    .options(ChatOptions.builder().model(resolvedModel))
+                    .options(ChatOptions.builder().model(modelOption))
                     .call()
                     .content();
                 return sanitizeGeneratedTitle(raw, userPrompt);
@@ -309,6 +340,17 @@ public class ConversationService {
             log.debug("Title generation timed out or failed, using deterministic fallback: {}", ex.getMessage());
             return fallbackTitle(userPrompt);
         }
+    }
+
+    public String generateTitleSafely(String userPrompt, String modelSlug) {
+        ResolvedChatModel resolved = null;
+        if (modelSlug != null && !modelSlug.isBlank()) {
+            try {
+                resolved = modelRegistryService.resolveAndValidateChatModel(modelSlug);
+            } catch (Exception ignored) {
+            }
+        }
+        return generateTitleSafely(userPrompt, resolved);
     }
 
     static String sanitizeGeneratedTitle(String rawTitle, String fallbackPrompt) {

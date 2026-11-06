@@ -10,6 +10,8 @@ import io.modivra.conversation.ConversationDtos.ConversationSummaryDto;
 import io.modivra.conversation.ConversationDtos.ConversationTurnRequest;
 import io.modivra.conversation.ConversationDtos.MessageDto;
 import io.modivra.conversation.ConversationDtos.NodeMappingDto;
+import io.modivra.model.routing.ResolvedChatModel;
+import io.modivra.model.service.ModelRegistryService;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
@@ -37,15 +39,18 @@ public class ConversationTreeService {
 
     private final ConversationRepository conversationRepository;
     private final ConversationNodeRepository nodeRepository;
+    private final ModelRegistryService modelRegistryService;
     private final String defaultModelSlug;
 
     public ConversationTreeService(
         ConversationRepository conversationRepository,
         ConversationNodeRepository nodeRepository,
+        ModelRegistryService modelRegistryService,
         @Value("${spring.ai.openai.chat.options.model:grok-4.7}") String defaultModelSlug
     ) {
         this.conversationRepository = conversationRepository;
         this.nodeRepository = nodeRepository;
+        this.modelRegistryService = modelRegistryService;
         this.defaultModelSlug = defaultModelSlug;
     }
 
@@ -60,8 +65,37 @@ public class ConversationTreeService {
         List<Message> promptMessages,
         String firstUserPromptText,
         boolean firstTurn,
-        MessageDto initialAssistantMessage
+        MessageDto initialAssistantMessage,
+        ResolvedChatModel resolvedModel
     ) {
+        public TurnPreparationResult(
+            UUID conversationId,
+            UUID userNodeId,
+            UUID assistantNodeId,
+            String modelSlug,
+            String defaultModelSlug,
+            String action,
+            Instant assistantCreatedAt,
+            List<Message> promptMessages,
+            String firstUserPromptText,
+            boolean firstTurn,
+            MessageDto initialAssistantMessage
+        ) {
+            this(
+                conversationId,
+                userNodeId,
+                assistantNodeId,
+                modelSlug,
+                defaultModelSlug,
+                action,
+                assistantCreatedAt,
+                promptMessages,
+                firstUserPromptText,
+                firstTurn,
+                initialAssistantMessage,
+                null
+            );
+        }
     }
 
     @Transactional(propagation = Propagation.REQUIRES_NEW)
@@ -125,9 +159,8 @@ public class ConversationTreeService {
             }
         }
 
-        String resolvedModel = (request.model() != null && !request.model().isBlank())
-            ? request.model().trim()
-            : this.defaultModelSlug;
+        ResolvedChatModel resolvedChatModel = modelRegistryService.resolveAndValidateChatModel(request.model());
+        String canonicalModelId = resolvedChatModel.canonicalId();
 
         Instant now = Instant.now();
         ConversationEntity conversation;
@@ -141,7 +174,7 @@ public class ConversationTreeService {
             conversation.setId(UUID.randomUUID());
             conversation.setUserId(userId);
             conversation.setTitle("New chat");
-            conversation.setDefaultModelSlug(resolvedModel);
+            conversation.setDefaultModelSlug(canonicalModelId);
             conversation.setArchived(false);
             conversation.setVisible(true);
             conversation.setCreatedAt(now);
@@ -306,12 +339,13 @@ public class ConversationTreeService {
         assistantNode.setParent(userNode);
         assistantNode.setRole("assistant");
         assistantNode.setContent(ContentDto.text(""));
-        assistantNode.setModelSlug(resolvedModel);
+        assistantNode.setModelSlug(canonicalModelId);
         assistantNode.setStatus("in_progress");
 
         Map<String, Object> assistantMeta = new LinkedHashMap<>();
         assistantMeta.put("message_type", action);
-        assistantMeta.put("model_slug", resolvedModel);
+        assistantMeta.put("model_slug", canonicalModelId);
+        assistantMeta.put("upstream_model_id", resolvedChatModel.upstreamModelId());
         assistantMeta.put("default_model_slug", conversation.getDefaultModelSlug());
         assistantNode.setMetadata(assistantMeta);
         assistantNode.setCreatedAt(assistantTime);
@@ -342,14 +376,15 @@ public class ConversationTreeService {
             conversation.getId(),
             userNode.getId(),
             assistantNode.getId(),
-            resolvedModel,
+            canonicalModelId,
             conversation.getDefaultModelSlug(),
             action,
             assistantTime,
             promptMessages,
             userPromptText,
             firstTurn,
-            initialAssistantMessage
+            initialAssistantMessage,
+            resolvedChatModel
         );
     }
 
@@ -756,5 +791,12 @@ public class ConversationTreeService {
             }
         }
         return conversation.getTitle();
+    }
+
+    @Transactional(readOnly = true)
+    public String resolveConversationModelSlug(UUID conversationId, String userId) {
+        return conversationRepository.findByIdAndUserIdAndVisibleTrue(conversationId, userId)
+            .map(ConversationEntity::getDefaultModelSlug)
+            .orElse(defaultModelSlug);
     }
 }
